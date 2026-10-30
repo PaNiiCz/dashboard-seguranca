@@ -1,5 +1,16 @@
-﻿from scapy.all import ARP, Ether, srp
+﻿from scapy.all import ARP, Ether, srp, conf
 import sys
+
+
+def pegar_fabricante(mac):
+    """
+    Consulta a base de fabricantes (OUI) embutida no Scapy
+    a partir dos 3 primeiros blocos do MAC.
+    """
+    try:
+        return conf.manufdb._get_manuf(mac)
+    except Exception:
+        return "Desconhecido"
 
 
 def scan_rede(faixa_ip):
@@ -18,6 +29,7 @@ def scan_rede(faixa_ip):
         dispositivos.append({
             "ip": recebido.psrc,
             "mac": recebido.hwsrc,
+            "fabricante": pegar_fabricante(recebido.hwsrc),
         })
 
     return dispositivos
@@ -33,7 +45,7 @@ if __name__ == "__main__":
         print("Nenhum dispositivo encontrado. Verifique se está rodando o terminal como Administrador.")
         sys.exit(1)
 
-    print(f"{'IP':<18}{'MAC'}")
-    print("-" * 40)
+    print(f"{'IP':<18}{'MAC':<20}{'Fabricante'}")
+    print("-" * 60)
     for d in dispositivos:
-        print(f"{d['ip']:<18}{d['mac']}")
+        print(f"{d['ip']:<18}{d['mac']:<20}{d['fabricante']}")
