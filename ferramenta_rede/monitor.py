@@ -69,23 +69,44 @@ def ler_tabela_arp(faixa_cidr):
     return dispositivos
 
 
+def mac_privado(mac):
+    """
+    MAC 'privado/aleatório' (usado por celulares com endereço Wi-Fi
+    privado): o bit de 'administrado localmente' está ligado, ou seja,
+    o segundo dígito hexadecimal do MAC é 2, 6, A ou E.
+    """
+    primeiro_byte = int(mac.split(":")[0], 16)
+    return bool(primeiro_byte & 0b10)
+
+
 def pegar_fabricante(mac):
+    if mac_privado(mac):
+        return "MAC privado (aleatório)"
     try:
-        return conf.manufdb._get_manuf(mac)
+        fabricante = conf.manufdb._get_manuf(mac)
     except Exception:
         return "Desconhecido"
+    # Quando não encontra, o Scapy devolve o próprio MAC
+    if not fabricante or fabricante.lower() == mac.lower():
+        return "Desconhecido"
+    return fabricante
 
 
-def ip_deste_pc():
+def ip_deste_pc(faixa_cidr):
     """
-    Descobre o IP local deste computador. O 'connect' em UDP não envia
-    nada pela rede, só faz o Windows escolher a interface de saída.
+    Descobre o IP deste computador DENTRO da faixa escaneada.
+    O 'connect' em UDP não envia nada pela rede: só faz o Windows
+    escolher a placa que alcança aquela faixa e nos dizer o IP dela.
     """
+    rede = ipaddress.ip_network(faixa_cidr, strict=False)
+    alvo = str(next(rede.hosts()))
+
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
-        s.connect(("8.8.8.8", 80))
-        return s.getsockname()[0]
-    except Exception:
+        s.connect((alvo, 80))
+        ip = s.getsockname()[0]
+        return ip if ipaddress.ip_address(ip) in rede else None
+    except OSError:
         return None
     finally:
         s.close()
@@ -119,9 +140,9 @@ def medir_latencia(ip, tentativas=3):
 def classificar_status(media, perda):
     if media is None:
         return "offline"
-    if perda >= 50 or media >= 150:
+    if perda >= 50 or media >= 250:
         return "ruim"
-    if perda > 0 or media >= 50:
+    if perda > 0 or media >= 100:
         return "atenção"
     return "saudável"
 
@@ -138,23 +159,25 @@ def escanear(faixa_cidr):
     """
     Função principal do módulo (a interface vai chamar esta).
     Devolve uma lista de dicionários com: ip, mac, fabricante,
-    latencia_ms, perda_pct e status.
+    latencia_ms, perda_pct, status e (opcional) este_pc.
     """
     ping_sweep(faixa_cidr)
     dispositivos = ler_tabela_arp(faixa_cidr)
 
-    # O arp -a nunca lista o próprio PC, então adicionamos manualmente
-    meu_ip = ip_deste_pc()
-    rede = ipaddress.ip_network(faixa_cidr, strict=False)
-    if meu_ip and ipaddress.ip_address(meu_ip) in rede:
-        if all(d["ip"] != meu_ip for d in dispositivos):
+    # O arp -a normalmente não lista o próprio PC, então garantimos aqui
+    meu_ip = ip_deste_pc(faixa_cidr)
+    if meu_ip:
+        existente = next((d for d in dispositivos if d["ip"] == meu_ip), None)
+        if existente:
+            existente["este_pc"] = True
+        else:
             dispositivos.append({"ip": meu_ip, "mac": "—", "este_pc": True})
 
     for d in dispositivos:
-        if d["mac"] != "—":
-            d["fabricante"] = pegar_fabricante(d["mac"])
-        else:
+        if d.get("este_pc"):
             d["fabricante"] = "(este PC)"
+        else:
+            d["fabricante"] = pegar_fabricante(d["mac"])
 
     with ThreadPoolExecutor(max_workers=20) as executor:
         dispositivos = list(executor.map(_analisar, dispositivos))
@@ -182,3 +205,6 @@ if __name__ == "__main__":
             f"{d['ip']:<16}{d['mac']:<19}{d['fabricante'][:28]:<30}"
             f"{lat:<11}{perda:<8}{d['status']}"
         )
+
+    if not any(d.get("este_pc") for d in dispositivos):
+        print(f"\nAviso: não consegui identificar este PC dentro da faixa {faixa}.")
