@@ -1,3 +1,7 @@
 ﻿venv/
 __pycache__/
 *.pyc
+
+ferramenta_rede/dispositivos_conhecidos.json
+
+ferramenta_rede/historico_rede.db*
