@@ -13,6 +13,9 @@ from PySide6.QtWidgets import (
 import nucleo
 import painel
 import saude
+import uso_rede
+import velocidade
+import vigia
 
 COR_STATUS = {
     "saudável": "#2e7d32", "atenção": "#e65100", "ruim": "#c62828",
@@ -67,6 +70,10 @@ class Ponte(QObject):
     scan_erro = Signal(str)
     saude_ok = Signal(object)
     saude_erro = Signal(str)
+    velocidade_ok = Signal(object)
+    velocidade_erro = Signal(str)
+    processos_ok = Signal(object)
+    processos_erro = Signal(str)
 
 
 class JanelaPrincipal(QMainWindow):
@@ -77,11 +84,23 @@ class JanelaPrincipal(QMainWindow):
         self.nucleo = nucleo.Nucleo()
         self.ocupado = False
 
+        self.vigia = vigia.Vigia()
+        self.vigia_notificados = set()
+        self.label_recursos = QLabel("")
+        self.statusBar().addPermanentWidget(self.label_recursos)
+        self.timer_vigia = QTimer(self)
+        self.timer_vigia.timeout.connect(self._checar_recursos)
+        self.timer_vigia.start(15000)
+
         self.ponte = Ponte()
         self.ponte.scan_ok.connect(self._scan_pronto)
         self.ponte.scan_erro.connect(self._scan_erro)
         self.ponte.saude_ok.connect(self._saude_pronta)
         self.ponte.saude_erro.connect(self._saude_erro)
+        self.ponte.velocidade_ok.connect(self._velocidade_pronta)
+        self.ponte.velocidade_erro.connect(self._velocidade_erro)
+        self.ponte.processos_ok.connect(self._processos_prontos)
+        self.ponte.processos_erro.connect(self._processos_erro)
 
         central = QWidget()
         self.setCentralWidget(central)
@@ -156,6 +175,50 @@ class JanelaPrincipal(QMainWindow):
         lay_saude.addWidget(self.nota)
         lay_saude.addWidget(self.texto_saude)
         abas.addTab(aba_saude, "Saúde da rede")
+
+        # Aba 4: internet (velocidade e uso aproximado por processo)
+        aba_internet = QWidget()
+        lay_internet = QVBoxLayout(aba_internet)
+
+        linha_vel = QHBoxLayout()
+        self.btn_velocidade = QPushButton("Testar velocidade agora (usa dados reais, ~20s)")
+        self.btn_velocidade.clicked.connect(self.testar_velocidade)
+        linha_vel.addWidget(self.btn_velocidade)
+        linha_vel.addStretch()
+        lay_internet.addLayout(linha_vel)
+
+        self.label_velocidade = QLabel("Download: —    Upload: —    Ping: —")
+        fonte_vel = QFont()
+        fonte_vel.setPointSize(16)
+        fonte_vel.setBold(True)
+        self.label_velocidade.setFont(fonte_vel)
+        lay_internet.addWidget(self.label_velocidade)
+
+        self.texto_velocidade = QPlainTextEdit()
+        self.texto_velocidade.setReadOnly(True)
+        self.texto_velocidade.setMaximumHeight(100)
+        self.texto_velocidade.setPlainText("Clique no botão acima para medir.")
+        lay_internet.addWidget(self.texto_velocidade)
+
+        lay_internet.addWidget(QLabel(
+            "Processos mais ativos agora (por nº de conexões abertas - aproximação, não é "
+            "medição exata de MB; Windows não expõe isso sem driver de captura):"
+        ))
+        linha_proc = QHBoxLayout()
+        self.btn_processos = QPushButton("Atualizar lista")
+        self.btn_processos.clicked.connect(self.atualizar_processos)
+        linha_proc.addWidget(self.btn_processos)
+        linha_proc.addStretch()
+        lay_internet.addLayout(linha_proc)
+
+        self.tabela_processos = QTableWidget(0, 2)
+        self.tabela_processos.setHorizontalHeaderLabels(["Processo", "Conexões ativas"])
+        self.tabela_processos.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.tabela_processos.verticalHeader().setVisible(False)
+        self.tabela_processos.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        lay_internet.addWidget(self.tabela_processos)
+
+        abas.addTab(aba_internet, "Internet")
 
         self.statusBar().showMessage("Pronto.")
         QTimer.singleShot(300, self.escanear)
@@ -318,3 +381,82 @@ class JanelaPrincipal(QMainWindow):
     def _fim_saude(self):
         self.btn_saude.setEnabled(True)
         self.btn_saude.setText("Verificar saúde da rede")
+
+    # ---------- vigia de recursos ----------
+    def _checar_recursos(self):
+        dados, alertas = self.vigia.amostra()
+        self.label_recursos.setText(
+            f"App: {dados['ram_propria_mb']:.0f} MB / {dados['cpu_propria_media_pct']:.0f}% CPU"
+            f"   |   PC: {dados['ram_sistema_pct']:.0f}% RAM, {dados['cpu_sistema_pct']:.0f}% CPU, "
+            f"{dados['disco_pct']:.0f}% disco"
+        )
+        for chave, mensagem in alertas:
+            if chave not in self.vigia_notificados:
+                self.vigia_notificados.add(chave)
+                painel.avisar("Alerta de desempenho", mensagem)
+        self.vigia_notificados &= {chave for chave, _ in alertas}
+
+    # ---------- teste de velocidade ----------
+    def testar_velocidade(self):
+        self.btn_velocidade.setEnabled(False)
+        self.btn_velocidade.setText("Testando... (não feche o programa)")
+        self.label_velocidade.setText("Download: ...    Upload: ...    Ping: ...")
+        threading.Thread(target=self._velocidade_thread, daemon=True).start()
+
+    def _velocidade_thread(self):
+        try:
+            conexao = velocidade.conectar()
+            try:
+                anteriores = velocidade.historico_recente(conexao, limite=10)
+                resultado = velocidade.medir()
+                avisos = velocidade.avaliar(resultado, anteriores)
+                velocidade.registrar(conexao, resultado)
+            finally:
+                conexao.close()
+            self.ponte.velocidade_ok.emit((resultado, avisos))
+        except Exception as erro:
+            self.ponte.velocidade_erro.emit(f"{type(erro).__name__}: {erro}")
+
+    def _velocidade_pronta(self, dados):
+        resultado, avisos = dados
+        self.label_velocidade.setText(
+            f"Download: {resultado['download_mbps']} Mbps    "
+            f"Upload: {resultado['upload_mbps']} Mbps    "
+            f"Ping: {resultado['ping_ms']} ms"
+        )
+        texto = f"Servidor: {resultado['servidor']}\n" + "\n".join(avisos)
+        self.texto_velocidade.setPlainText(texto)
+        self.btn_velocidade.setEnabled(True)
+        self.btn_velocidade.setText("Testar velocidade agora (usa dados reais, ~20s)")
+
+    def _velocidade_erro(self, mensagem):
+        self.texto_velocidade.setPlainText(f"Erro: {mensagem}")
+        self.btn_velocidade.setEnabled(True)
+        self.btn_velocidade.setText("Testar velocidade agora (usa dados reais, ~20s)")
+
+    # ---------- processos mais ativos ----------
+    def atualizar_processos(self):
+        self.btn_processos.setEnabled(False)
+        self.btn_processos.setText("Atualizando...")
+        threading.Thread(target=self._processos_thread, daemon=True).start()
+
+    def _processos_thread(self):
+        try:
+            self.ponte.processos_ok.emit(uso_rede.processos_mais_ativos())
+        except Exception as erro:
+            self.ponte.processos_erro.emit(f"{type(erro).__name__}: {erro}")
+
+    def _processos_prontos(self, lista):
+        self.tabela_processos.setRowCount(len(lista))
+        for linha, (nome, qtd) in enumerate(lista):
+            self.tabela_processos.setItem(linha, 0, QTableWidgetItem(nome))
+            self.tabela_processos.setItem(linha, 1, QTableWidgetItem(str(qtd)))
+        self.btn_processos.setEnabled(True)
+        self.btn_processos.setText("Atualizar lista")
+
+    def _processos_erro(self, mensagem):
+        self.tabela_processos.setRowCount(1)
+        self.tabela_processos.setItem(0, 0, QTableWidgetItem(mensagem))
+        self.tabela_processos.setItem(0, 1, QTableWidgetItem(""))
+        self.btn_processos.setEnabled(True)
+        self.btn_processos.setText("Atualizar lista")

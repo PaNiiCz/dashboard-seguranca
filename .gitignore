@@ -4,3 +4,4 @@ __pycache__/
 ferramenta_rede/dispositivos_conhecidos.json
 ferramenta_rede/historico_rede.db*
 ferramenta_rede/configuracao_local.json
+ferramenta_rede/velocidade_historico.db*
